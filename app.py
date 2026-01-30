@@ -10,19 +10,25 @@ import datetime
 st.set_page_config(page_title="Airbnb Dynamic Pricing MVP", layout="wide")
 
 @st.cache_resource
-def load_system():
-    """Loads the Model, Artifacts, and Database once at startup."""
-    print("Loading system files...")
+def load_model_artifacts():
+    """Loads the Model and Artifacts (heavy resources)."""
+    print("Loading model and artifacts...")
     model = joblib.load('model/model_latest.pkl')
     
     with open('artifacts/pricing_artifacts.pkl', 'rb') as f:
         artifacts = pickle.load(f)
-        
+    return model, artifacts
+
+@st.cache_data
+def load_data():
+    """Loads the Database (data)."""
+    print("Loading data...")
     db = pd.read_parquet('data/cleaned_london_airbnb_data.parquet', engine='fastparquet')
-    return model, artifacts, db
+    return db
 
 try:
-    model, artifacts, db = load_system()
+    model, artifacts = load_model_artifacts()
+    db = load_data()
 except FileNotFoundError as e:
     st.error(f"Critical Error: Missing file: {e}")
     st.stop()
