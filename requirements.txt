@@ -5,3 +5,7 @@ joblib
 lightgbm
 fastparquet
 altair
+<<<<<<< Updated upstream
+=======
+scikit-learn
+>>>>>>> Stashed changes
