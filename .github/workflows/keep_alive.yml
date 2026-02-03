@@ -7,4 +7,4 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Ping Streamlit App
-        run: curl -I https://your-app-link.streamlit.app/
+        run: curl -I https://dynamic--pricing--engine.streamlit.app/
