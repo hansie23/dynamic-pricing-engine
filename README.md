@@ -15,15 +15,6 @@ An AI-powered tool designed for London Airbnb hosts to maximize revenue through 
 
 ---
 
-## 📈 Product Management & Strategy
-
-The development of this engine is guided by clear product goals and strategic planning. You can explore the foundational documents here:
-
-*   **[Product Requirements Document (PRD)](<Product Management/PRD.md>)**: Detailed breakdown of project goals, functional requirements, and success metrics.
-*   **[Product Roadmap](<Product Management/Roadmap.md>)**: Overview of the project's development phases, from MVP to future refinements.
-*   **[RICE Matrix](<Product Management/RICE_Matrix.md>)**: Prioritization framework used to rank features based on Reach, Impact, Confidence, and Effort.
-
----
 
 ## ✨ Key Features
 
@@ -41,25 +32,6 @@ The development of this engine is guided by clear product goals and strategic pl
 *   **Data Processing:** Pandas, NumPy, FastParquet
 *   **Machine Learning:** LightGBM, Scikit-learn, Joblib
 *   **Visualization:** Matplotlib
-
----
-
-## 🚀 Getting Started
-
-### 1. Prerequisites
-Ensure you have Python 3.9+ installed.
-
-### 2. Installation
-Clone the repository and install the required packages:
-```bash
-pip install -r requirements.txt
-```
-
-### 3. Run the Application
-Launch the Streamlit dashboard:
-```bash
-streamlit run app.py
-```
 
 ---
 
