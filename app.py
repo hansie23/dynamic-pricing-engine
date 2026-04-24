@@ -9,15 +9,40 @@ import datetime
 # --- 1. SETUP & LOADING ---
 st.set_page_config(page_title="Airbnb Dynamic Pricing MVP", layout="wide")
 
+from huggingface_hub import hf_hub_download
+import os
+
+# --- HF CONFIG ---
+# Replace with your actual Hugging Face Repo ID
+REPO_ID = "hansie23/dynamic-pricing-engine"
+
 @st.cache_resource
 def load_model_artifacts():
-    """Loads the Model and Artifacts (heavy resources)."""
-    print("Loading model and artifacts...")
-    model = joblib.load('model/model_latest.pkl')
-    
-    with open('artifacts/pricing_artifacts.pkl', 'rb') as f:
-        artifacts = pickle.load(f)
-    return model, artifacts
+    """Loads assets. Pulls from HF Hub if local files are missing."""
+    model_local_path = 'model/model_latest.pkl'
+    artifacts_local_path = 'artifacts/pricing_artifacts.pkl'
+
+    # Check if we are running locally with files already present
+    if os.path.exists(model_local_path) and os.path.exists(artifacts_local_path):
+        print("✅ Loading assets from local directory...")
+        model = joblib.load(model_local_path)
+        with open(artifacts_local_path, 'rb') as f:
+            artifacts = pickle.load(f)
+        return model, artifacts
+
+    # Otherwise, download from Hugging Face Hub (Production mode)
+    print("📥 Fetching assets from Hugging Face Hub...")
+    try:
+        m_path = hf_hub_download(repo_id=REPO_ID, filename="model_latest.pkl")
+        a_path = hf_hub_download(repo_id=REPO_ID, filename="pricing_artifacts.pkl")
+        
+        model = joblib.load(m_path)
+        with open(a_path, 'rb') as f:
+            artifacts = pickle.load(f)
+        return model, artifacts
+    except Exception as e:
+        st.error(f"Error fetching assets from Hugging Face: {e}")
+        st.stop()
 
 @st.cache_data
 def load_data():

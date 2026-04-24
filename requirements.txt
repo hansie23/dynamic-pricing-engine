@@ -8,3 +8,4 @@ altair
 scikit-learn
 jinja2
 matplotlib
+huggingface_hub

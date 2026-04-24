@@ -1,3 +1,14 @@
+---
+title: London Airbnb Dynamic Pricing
+emoji: 🏡
+colorFrom: blue
+colorTo: green
+sdk: docker
+python_version: "3.9"
+app_file: app.py
+pinned: false
+---
+
 # 🏨 London Airbnb Dynamic Pricing Engine
 
 **[LIVE MVP](https://dynamic--pricing--engine.streamlit.app/)**  
