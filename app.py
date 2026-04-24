@@ -38,37 +38,48 @@ except Exception as e:
 
 # --- 2. HELPER FUNCTIONS (The Logic) ---
 
-def find_optimal_price(listing_row, model, min_price_mult=0.5, max_price_mult=2.0):
+def find_optimal_price(listing_row, model, artifacts, min_price_mult=0.5, max_price_mult=2.0):
     """Tests 100 prices to find the winner."""
     # Clean input
     listing_row = listing_row.drop(labels=['is_booked', 'listing_id'], errors='ignore')
-    current_price = listing_row['price']
     
-    # Generate Test Prices
+    # Base price in real £ (must reverse log1p)
+    current_real_price = np.expm1(listing_row['log_price'])
+    
+    # Generate Test Prices (Real £)
     test_prices = np.linspace(
-        start=max(20, current_price * min_price_mult),
-        stop=current_price * max_price_mult, 
+        start=max(20, current_real_price * min_price_mult),
+        stop=current_real_price * max_price_mult, 
         num=100
     )
     
-    # Create Batch
-    batch_df = pd.DataFrame([listing_row] * len(test_prices))
-    batch_df['price'] = test_prices
+    # Convert test prices to Log for the model
+    log_test_prices = np.log1p(test_prices)
     
-    # RECALCULATE RELATIVE PRICE (Crucial!)
-    if 'price_competitiveness' in listing_row:
-        # Reverse engineer the avg price from the current row
-        avg_neigh_price = current_price / listing_row['price_competitiveness']
-        if avg_neigh_price == 0: avg_neigh_price = 1
-        batch_df['price_competitiveness'] = batch_df['price'] / avg_neigh_price
+    # Create Batch for prediction
+    batch_df = pd.DataFrame([listing_row] * len(test_prices))
+    batch_df['log_price'] = log_test_prices
+    
+    # RECALCULATE LOG PRICE COMPETITIVENESS
+    # Logic: Log(Price / Avg) = Log(Price) - Log(Avg)
+    neighborhood = listing_row['neighbourhood_cleansed']
+    avg_log_price = artifacts['avg_log_price_lookup'].get(neighborhood, artifacts['global_avg_log_price'])
+    
+    batch_df['log_price_competitiveness'] = log_test_prices - avg_log_price
         
     # Predict
-    # Keep only valid columns
     valid_cols = model.feature_name_
-    
-    # Ensure columns match
-    batch_df.columns = [str(c).replace(' ', '_').replace('/', '_') for c in batch_df.columns]
     batch_df = batch_df.reindex(columns=valid_cols, fill_value=0)
+    
+    # --- FIX: Restore Categorical Types for LightGBM ---
+    # LightGBM requires categorical columns to have the 'category' dtype
+    cat_features = [
+        'month', 'day_of_week', 'neighbourhood_cleansed', 
+        'property_type', 'property_group', 'rating_binned'
+    ]
+    for col in cat_features:
+        if col in batch_df.columns:
+            batch_df[col] = batch_df[col].astype('category')
     
     probs = model.predict_proba(batch_df)[:, 1]
     expected_revenues = test_prices * probs
@@ -79,7 +90,7 @@ def find_optimal_price(listing_row, model, min_price_mult=0.5, max_price_mult=2.
     return {
         'optimal_price': test_prices[best_idx],
         'max_revenue': expected_revenues[best_idx],
-        'current_price': current_price
+        'current_price': current_real_price
     }
 
 def generate_schedule(listing_id, model, db, artifacts, days=30):
@@ -95,30 +106,26 @@ def generate_schedule(listing_id, model, db, artifacts, days=30):
     neighborhood = base_row['neighbourhood_cleansed']
     
     # --- DEFINE START DATE ---
-    # Start predicting from "Tomorrow" relative to today
     start_date = datetime.date.today() + datetime.timedelta(days=1)
     
     schedule = []
     
-    for day in range(days): # Loop 0 to 29
+    for day in range(days):
         sim_row = base_row.copy()
-        
-        # --- CALCULATE ACTUAL DATE ---
         current_date = start_date + datetime.timedelta(days=day)
         
-        # 1. Update Time Features Correctly
-        sim_row['lead_time'] = day + 1          # Lead time starts at 1 (Tomorrow)
-        sim_row['month'] = current_date.month   # Uses the REAL month (e.g., 12 for Dec)
-        sim_row['day_of_week'] = current_date.weekday() # 0=Mon, 6=Sun
-        sim_row['day_of_year'] = current_date.timetuple().tm_yday # 1-365
+        # 1. Update Time Features
+        sim_row['lead_time'] = day + 1
+        sim_row['month'] = current_date.month
+        sim_row['day_of_week'] = current_date.weekday()
         sim_row['is_weekend'] = 1 if sim_row['day_of_week'] >= 5 else 0
         
         # 2. Inject Artifacts (The "Brain")
-        # Neigh x Day
+        # interaction_neigh_dow
         dow_score = artifacts['neigh_dow_lookup'].get((neighborhood, sim_row['day_of_week']), artifacts['global_mean'])
         sim_row['interaction_neigh_dow'] = dow_score
         
-        # Neigh x Lead Time
+        # interaction_neigh_lead
         if sim_row['lead_time'] <= 3: bucket = 'LastMinute'
         elif sim_row['lead_time'] <= 7: bucket = 'ThisWeek'
         elif sim_row['lead_time'] <= 14: bucket = 'NextWeek'
@@ -128,13 +135,12 @@ def generate_schedule(listing_id, model, db, artifacts, days=30):
         lead_score = artifacts['neigh_lead_lookup'].get((neighborhood, bucket), artifacts['global_mean'])
         sim_row['interaction_neigh_lead'] = lead_score
         
-        # Relative Price (using the artifact)
-        avg_neigh_price = artifacts['avg_price_lookup'].get(neighborhood, artifacts['global_avg_price'])
-        if avg_neigh_price == 0: avg_neigh_price = 1
-        sim_row['price_competitiveness'] = sim_row['price'] / avg_neigh_price
+        # log_price_competitiveness
+        avg_log_price = artifacts['avg_log_price_lookup'].get(neighborhood, artifacts['global_avg_log_price'])
+        sim_row['log_price_competitiveness'] = sim_row['log_price'] - avg_log_price
         
         # 3. Optimize
-        res = find_optimal_price(sim_row, model)
+        res = find_optimal_price(sim_row, model, artifacts)
         
         schedule.append({
             'Day Ahead': day + 1,
