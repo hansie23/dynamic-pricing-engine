@@ -4,104 +4,89 @@ import numpy as np
 import joblib
 import pickle
 import datetime 
-
-
-# --- 1. SETUP & LOADING ---
-st.set_page_config(page_title="Airbnb Dynamic Pricing MVP", layout="wide")
-
-from huggingface_hub import hf_hub_download
 import os
+from huggingface_hub import hf_hub_download
 
-# --- HF CONFIG ---
-# Replace with your actual Hugging Face Repo ID
+# UI Setup
+st.set_page_config(page_title="London Airbnb Pricing Tool", layout="wide")
+
+# My HF Repo for the model
 REPO_ID = "hansie23/dynamic-pricing-engine"
 
 @st.cache_resource
 def load_model_artifacts():
-    """Loads assets. Pulls from HF Hub if local files are missing."""
-    model_local_path = 'model/model_latest.pkl'
-    artifacts_local_path = 'artifacts/pricing_artifacts.pkl'
+    """
+    I'm loading the model and artifacts here. 
+    It checks locally first for dev, then pulls from my HF Hub repo for production.
+    """
+    model_path = 'model/model_latest.pkl'
+    artifacts_path = 'artifacts/pricing_artifacts.pkl'
 
-    # Check if we are running locally with files already present
-    if os.path.exists(model_local_path) and os.path.exists(artifacts_local_path):
-        print("✅ Loading assets from local directory...")
-        model = joblib.load(model_local_path)
-        with open(artifacts_local_path, 'rb') as f:
-            artifacts = pickle.load(f)
-        return model, artifacts
+    # Check for local files first
+    if os.path.exists(model_path) and os.path.exists(artifacts_path):
+        m = joblib.load(model_path)
+        with open(artifacts_path, 'rb') as f:
+            a = pickle.load(f)
+        return m, a
 
-    # Otherwise, download from Hugging Face Hub (Production mode)
-    print("📥 Fetching assets from Hugging Face Hub...")
+    # Pull from Hugging Face if local files are missing (Production)
     try:
-        m_path = hf_hub_download(repo_id=REPO_ID, filename="model_latest.pkl")
-        a_path = hf_hub_download(repo_id=REPO_ID, filename="pricing_artifacts.pkl")
+        m_hub = hf_hub_download(repo_id=REPO_ID, filename="model_latest.pkl")
+        a_hub = hf_hub_download(repo_id=REPO_ID, filename="pricing_artifacts.pkl")
         
-        model = joblib.load(m_path)
-        with open(a_path, 'rb') as f:
-            artifacts = pickle.load(f)
-        return model, artifacts
+        m = joblib.load(m_hub)
+        with open(a_hub, 'rb') as f:
+            a = pickle.load(f)
+        return m, a
     except Exception as e:
-        st.error(f"Error fetching assets from Hugging Face: {e}")
+        st.error(f"Failed to load from Hub: {e}")
         st.stop()
 
 @st.cache_data
 def load_data():
-    """Loads the Database (data)."""
-    print("Loading data...")
-    db = pd.read_parquet('data/cleaned_london_airbnb_data.parquet', engine='fastparquet')
-    return db
+    # Load the cleaned dataset
+    return pd.read_parquet('data/cleaned_london_airbnb_data.parquet', engine='fastparquet')
 
+# Initialize the system
 try:
     model, artifacts = load_model_artifacts()
     db = load_data()
-except FileNotFoundError as e:
-    st.error(f"Critical Error: Missing file: {e}")
-    st.stop()
 except Exception as e:
-    st.error(f"Error loading system: {e}")
+    st.error(f"System boot error: {e}")
     st.stop()
 
-# --- 2. HELPER FUNCTIONS (The Logic) ---
+# --- Optimization Core ---
 
 def find_optimal_price(listing_row, model, artifacts, min_price_mult=0.5, max_price_mult=2.0):
-    """Tests 100 prices to find the winner."""
-    # Clean input
+    """Testing 100 price points to find the sweet spot for revenue."""
     listing_row = listing_row.drop(labels=['is_booked', 'listing_id'], errors='ignore')
     
-    # Base price in real £ (must reverse log1p)
     current_real_price = np.expm1(listing_row['log_price'])
     
-    # Generate Test Prices (Real £)
+    # Range of prices to simulate
     test_prices = np.linspace(
         start=max(20, current_real_price * min_price_mult),
         stop=current_real_price * max_price_mult, 
         num=100
     )
     
-    # Convert test prices to Log for the model
     log_test_prices = np.log1p(test_prices)
     
-    # Create Batch for prediction
+    # Build the simulation batch
     batch_df = pd.DataFrame([listing_row] * len(test_prices))
     batch_df['log_price'] = log_test_prices
     
-    # RECALCULATE LOG PRICE COMPETITIVENESS
-    # Logic: Log(Price / Avg) = Log(Price) - Log(Avg)
+    # Recalculate competitiveness score for each simulated price
     neighborhood = listing_row['neighbourhood_cleansed']
     avg_log_price = artifacts['avg_log_price_lookup'].get(neighborhood, artifacts['global_avg_log_price'])
-    
     batch_df['log_price_competitiveness'] = log_test_prices - avg_log_price
         
-    # Predict
+    # Ensure columns match model expectations
     valid_cols = model.feature_name_
     batch_df = batch_df.reindex(columns=valid_cols, fill_value=0)
     
-    # --- FIX: Restore Categorical Types for LightGBM ---
-    # LightGBM requires categorical columns to have the 'category' dtype
-    cat_features = [
-        'month', 'day_of_week', 'neighbourhood_cleansed', 
-        'property_type', 'property_group', 'rating_binned'
-    ]
+    # Force categorical types for LightGBM
+    cat_features = ['month', 'day_of_week', 'neighbourhood_cleansed', 'property_type', 'property_group', 'rating_binned']
     for col in cat_features:
         if col in batch_df.columns:
             batch_df[col] = batch_df[col].astype('category')
@@ -109,7 +94,6 @@ def find_optimal_price(listing_row, model, artifacts, min_price_mult=0.5, max_pr
     probs = model.predict_proba(batch_df)[:, 1]
     expected_revenues = test_prices * probs
     
-    # Find Winner
     best_idx = np.argmax(expected_revenues)
     
     return {
@@ -119,9 +103,7 @@ def find_optimal_price(listing_row, model, artifacts, min_price_mult=0.5, max_pr
     }
 
 def generate_schedule(listing_id, model, db, artifacts, days=30):
-    """Generates the 30-day forecast with dates."""
-    
-    # A. LOOKUP
+    """Building the 30-day forecast table."""
     listing_data = db[db['listing_id'] == listing_id]
     
     if listing_data.empty:
@@ -129,8 +111,6 @@ def generate_schedule(listing_id, model, db, artifacts, days=30):
         
     base_row = listing_data.iloc[0]
     neighborhood = base_row['neighbourhood_cleansed']
-    
-    # --- DEFINE START DATE ---
     start_date = datetime.date.today() + datetime.timedelta(days=1)
     
     schedule = []
@@ -139,32 +119,29 @@ def generate_schedule(listing_id, model, db, artifacts, days=30):
         sim_row = base_row.copy()
         current_date = start_date + datetime.timedelta(days=day)
         
-        # 1. Update Time Features
+        # Update time-based features for the forecast day
         sim_row['lead_time'] = day + 1
         sim_row['month'] = current_date.month
         sim_row['day_of_week'] = current_date.weekday()
         sim_row['is_weekend'] = 1 if sim_row['day_of_week'] >= 5 else 0
         
-        # 2. Inject Artifacts (The "Brain")
-        # interaction_neigh_dow
-        dow_score = artifacts['neigh_dow_lookup'].get((neighborhood, sim_row['day_of_week']), artifacts['global_mean'])
-        sim_row['interaction_neigh_dow'] = dow_score
+        # Pull smoothed neighborhood scores from artifacts
+        sim_row['interaction_neigh_dow'] = artifacts['neigh_dow_lookup'].get((neighborhood, sim_row['day_of_week']), artifacts['global_mean'])
         
-        # interaction_neigh_lead
-        if sim_row['lead_time'] <= 3: bucket = 'LastMinute'
-        elif sim_row['lead_time'] <= 7: bucket = 'ThisWeek'
-        elif sim_row['lead_time'] <= 14: bucket = 'NextWeek'
-        elif sim_row['lead_time'] <= 30: bucket = 'ThisMonth'
+        # Handle lead time buckets
+        lt = sim_row['lead_time']
+        if lt <= 3: bucket = 'LastMinute'
+        elif lt <= 7: bucket = 'ThisWeek'
+        elif lt <= 14: bucket = 'NextWeek'
+        elif lt <= 30: bucket = 'ThisMonth'
         else: bucket = 'FarOut'
         
-        lead_score = artifacts['neigh_lead_lookup'].get((neighborhood, bucket), artifacts['global_mean'])
-        sim_row['interaction_neigh_lead'] = lead_score
+        sim_row['interaction_neigh_lead'] = artifacts['neigh_lead_lookup'].get((neighborhood, bucket), artifacts['global_mean'])
         
-        # log_price_competitiveness
-        avg_log_price = artifacts['avg_log_price_lookup'].get(neighborhood, artifacts['global_avg_log_price'])
-        sim_row['log_price_competitiveness'] = sim_row['log_price'] - avg_log_price
+        # Relative price competitiveness
+        avg_log_p = artifacts['avg_log_price_lookup'].get(neighborhood, artifacts['global_avg_log_price'])
+        sim_row['log_price_competitiveness'] = sim_row['log_price'] - avg_log_p
         
-        # 3. Optimize
         res = find_optimal_price(sim_row, model, artifacts)
         
         schedule.append({
@@ -179,14 +156,8 @@ def generate_schedule(listing_id, model, db, artifacts, days=30):
     return pd.DataFrame(schedule)
 
 def display_styled_rate_card(df):
-    """Styles the dataframe with green bars for uplift and clean formatting."""
-    # 1. Define columns to display
-    show_cols = [
-        'Date', 'Weekday', 'Current Price', 
-        'Suggested Price', 'Expected Revenue', 'Revenue Uplift'
-    ]
-    
-    # 2. Styling
+    """Custom styling for the results table."""
+    show_cols = ['Date', 'Weekday', 'Current Price', 'Suggested Price', 'Expected Revenue', 'Revenue Uplift']
     return df[show_cols].style \
         .format({
             'Current Price': '£{:,.2f}',
@@ -194,75 +165,45 @@ def display_styled_rate_card(df):
             'Expected Revenue': '£{:,.2f}',
             'Revenue Uplift': '+£{:,.2f}'
         }) \
-        .background_gradient(
-            subset=['Suggested Price'], 
-            cmap='Blues', 
-            low=0.4, high=0.4
-        ) \
-        .bar(
-            subset=['Revenue Uplift'], 
-            align='mid', 
-            color=['#d65f5f', '#5fba7d'],
-            width=90
-        ) \
+        .background_gradient(subset=['Suggested Price'], cmap='Blues', low=0.4, high=0.4) \
+        .bar(subset=['Revenue Uplift'], align='mid', color=['#d65f5f', '#5fba7d'], width=90) \
         .set_properties(**{'text-align': 'center'})
 
-# --- 3. THE UI (Frontend) ---
+# --- Dashboard Layout ---
 
-st.title("🏨 London Airbnb Dynamic Pricing Engine")
-st.markdown("Optimize your Airbnb listing using AI-driven demand forecasting.")
+st.title("London Airbnb Dynamic Pricing Engine")
+st.markdown("Automated pricing suggestions based on local market demand.")
 
-# Sidebar Inputs
-st.sidebar.header("Configuration")
-input_id = st.sidebar.number_input("Enter Listing ID", step=1, value=int(db['listing_id'].iloc[0]))
-days_forecast = st.sidebar.slider("Forecast Range", 7, 60, 30)
+st.sidebar.header("Settings")
+input_id = st.sidebar.number_input("Listing ID", step=1, value=int(db['listing_id'].iloc[0]))
+days_forecast = st.sidebar.slider("Forecast Window (Days)", 7, 60, 30)
 
-if st.sidebar.button("🚀 Generate Prices"):
-    with st.spinner(f"Analyzing market data for Listing {input_id}..."):
-        
-        # Run the Engine
+if st.sidebar.button("Run Optimizer"):
+    with st.spinner(f"Simulating market demand for {input_id}..."):
         df_results = generate_schedule(input_id, model, db, artifacts, days_forecast)
 
         if df_results is not None:
-            # 1. Summary Metrics
             avg_suggested = df_results['Suggested Price'].mean()
             avg_current = df_results['Current Price'].mean()
             uplift = ((avg_suggested - avg_current) / avg_current) * 100
             
-            col1, col2, col3 = st.columns(3)
-            col1.metric("Avg Suggested Price", f"£{avg_suggested:.0f}")
-            col2.metric("Avg Current Price", f"£{avg_current:.0f}")
-            col3.metric("Potential Revenue Uplift", f"{uplift:.1f}%", delta_color="normal")
+            m1, m2, m3 = st.columns(3)
+            m1.metric("Suggested Avg", f"£{avg_suggested:.0f}")
+            m2.metric("Current Avg", f"£{avg_current:.0f}")
+            m3.metric("Expected Uplift", f"{uplift:.1f}%")
 
-            # 2. CALCULATE UPLIFT & BASELINE
-            # Create a dedicated column for Baseline for plotted comparison
             df_results['Baseline Revenue'] = df_results['Current Price'] * 0.4 
             df_results['Revenue Uplift'] = df_results['Expected Revenue'] - df_results['Baseline Revenue']
 
-            # 3. DISPLAY TABLE
-            st.subheader("📅 Optimized Schedule")
+            st.subheader("Pricing Schedule")
             with st.container(height=600):
                 st.table(display_styled_rate_card(df_results))
             
-            # --- PRICE TREND CHART ---
-            st.subheader("📈 Price Trend Forecast")
-            price_chart_data = df_results.set_index('Date')[['Suggested Price', 'Current Price']]
-            st.line_chart(
-                price_chart_data, 
-                color=["#00CC96", "#d3d3d3"],
-                height=300
-            )
+            st.subheader("Price Forecast")
+            st.line_chart(df_results.set_index('Date')[['Suggested Price', 'Current Price']], color=["#00CC96", "#d3d3d3"])
 
-            # --- REVENUE TREND CHART ---
-            st.subheader("💷 Revenue Trend Forecast")
-            rev_chart_data = df_results.set_index('Date')[['Baseline Revenue', 'Expected Revenue']]
-            st.line_chart(
-                rev_chart_data,
-                color=["#d3d3d3", "#00CC96"],  
-                height=300
-            )
+            st.subheader("Revenue Forecast")
+            st.line_chart(df_results.set_index('Date')[['Baseline Revenue', 'Expected Revenue']], color=["#d3d3d3", "#00CC96"])
             
         else:
-            st.error(f"Listing ID {input_id} not found in database.")
-            st.info("Try using one of these valid IDs from your dataset:")
-            st.write(db['listing_id'].unique())
+            st.error(f"ID {input_id} not found. Try another one.")
